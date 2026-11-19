@@ -1,19 +1,13 @@
 """
-Sox-compatible spectrogram generation using TensorFlow.
+SoX-compatible spectrogram generation.
 
-This module provides a TensorFlow implementation that generates spectrograms matching sox output
-with 99.99%+ pixel accuracy. The main entry point is `spectrogram()`.
+This module renders spectrograms that match the output of the `sox` binary's
+spectrogram effect. The main entry point is `spectrogram()`.
 
 Example usage:
-    import tensorflow as tf
-    from tensorflow_sox_spectrogram import spectrogram
+    from sox_numpy import spectrogram
 
-    # From TensorFlow tensor
-    audio_tensor = tf.random.normal([96000])  # 12 seconds at 8kHz
-    spectrogram = spectrogram(audio_tensor, shape=(257, 1000), sample_rate=8000)
-
-    # From numpy array (converted internally)
-    spectrogram = spectrogram(audio_array, shape=(257, 1000), sample_rate=48000)
+    pixels = spectrogram(audio_array, shape=(257, 1000), sample_rate=48000)
 """
 
 from __future__ import annotations

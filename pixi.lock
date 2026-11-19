@@ -3258,7 +3258,7 @@ packages:
   size: 433413
   timestamp: 1764777166076
 - pypi: .
-  name: sox-tensorflow
+  name: sox-numpy
   requires_dist:
   - numpy>=1.26.0,<3
   - soundfile>=0.13.1,<0.14

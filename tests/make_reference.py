@@ -17,7 +17,7 @@ import tensorflow as tf
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from sox_tensorflow import spectrogram  # noqa: E402
+from sox_numpy import spectrogram  # noqa: E402
 from tests.reference_cases import get_reference_cases, get_reference_path  # noqa: E402
 
 

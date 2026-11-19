@@ -1,4 +1,4 @@
-# sox_tensorflow
+# sox_numpy
 
 TensorFlow implementation of SoX-style spectrogram generation that uses TensorFlow operations for GPU acceleration.
 
@@ -30,7 +30,7 @@ For more details see the scripts and notebooks found in the [comparison folder](
 ```python
 import soundfile as sf
 import tensorflow as tf
-from sox_tensorflow import spectrogram, spectrogram_from_flac
+from sox_numpy import spectrogram, spectrogram_from_flac
 
 # From a numpy array
 samples, sr = sf.read('audio.flac', dtype='float64', always_2d=True)

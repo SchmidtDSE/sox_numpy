@@ -1,6 +1,6 @@
-# SoxTensorflow: Spectrogram Analysis
+# sox_numpy: Spectrogram Analysis
 
-[SoxTensorflow](https://github.com/SchmidtDSE/sox_tensorflow) is a TensorFlow implementation of [SoX](https://github.com/chirlu/sox) spectrogram generation, allowing for GPU accelration when generating spectrograms. 
+[sox_numpy](https://github.com/SchmidtDSE/sox_numpy) is a NumPy implementation of [SoX](https://github.com/chirlu/sox) spectrogram generation, which began as sox_tensorflow. 
 
 The resulting spectrograms are close, though not identical to the SoX spectrograms.  Here we look at how closely the tf-sox-spectrograms to match sox-spectrograms. We do this comparison, both overall and at different levels of brightness. We then look at the differences when spectorgrams are passed through a model.
 
@@ -93,7 +93,7 @@ The notebook reads paths from `config.yaml` automatically — just set
 | File | Description |
 |---|---|
 | `config.yaml` | Default configuration for both scripts |
-| `compare_spectrograms.py` | Generates spectrogram pairs (sox + sox_tensorflow) and compares pixel-by-pixel |
+| `compare_spectrograms.py` | Generates spectrogram pairs (sox + sox_numpy) and compares pixel-by-pixel |
 | `compare_model.py` | Runs a model on existing spectrogram pairs and compares predictions |
 | `parity_check.sh` | Runs both scripts in the pixi env of a base git ref (default `main`) and of the current tree, then plots them side by side — e.g. to show a dependency bump doesn't change output. `comparison/parity_check.sh -h` for options |
 | `plot_parity.py` | Plots the before/after figure from two `parity_check.sh` runs |
@@ -130,7 +130,7 @@ Supported formats: FLAC, WAV, MP3, OGG.
 | `<output>/results/overall_comparison.csv` | Per-segment pixel statistics |
 | `<output>/results/percentile_comparison.csv` | Per-segment statistics by brightness decile |
 | `<output>/spectrograms/*.sox.png` | Spectrograms from the sox binary |
-| `<output>/spectrograms/*.tf.png` | Spectrograms from sox_tensorflow |
+| `<output>/spectrograms/*.tf.png` | Spectrograms from sox_numpy |
 
 ---
 

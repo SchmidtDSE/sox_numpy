@@ -117,7 +117,7 @@ def main(base: Path, head: Path, figure: Path, top_classes: int) -> None:
 
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="upper left", ncol=2, frameon=False, bbox_to_anchor=(0.005, 0.89))
-    fig.suptitle(f"sox_tensorflow parity — {platform.system().lower()}-{platform.machine()}",
+    fig.suptitle(f"sox_numpy parity — {platform.system().lower()}-{platform.machine()}",
                  fontsize=15, fontweight="bold", x=0.01, ha="left", y=0.99)
     fig.text(
         0.01, 0.905,

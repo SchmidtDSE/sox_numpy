@@ -1,6 +1,7 @@
 """Tests that `spectrogram()` gives 0.1.3's pixels."""
 
 import contextlib
+import importlib.metadata
 import random
 from concurrent.futures import ThreadPoolExecutor
 
@@ -9,7 +10,7 @@ import pytest
 import tensorflow as tf
 from PIL import Image
 
-from sox_tensorflow import processor, spectrogram
+from sox_numpy import processor, spectrogram
 from tests.reference_cases import (
     get_platform_key,
     get_reference_cases,
@@ -118,3 +119,7 @@ def test_dest_writes_a_png_of_the_returned_pixels(tmp_path):
     assert result == str(path)
     pixels = spectrogram(case.get_input(), **case.kwargs).numpy()
     np.testing.assert_array_equal(np.asarray(Image.open(path)), pixels)
+
+
+def test_the_package_is_sox_numpy_0_1_0():
+    assert importlib.metadata.version("sox_numpy") == "0.1.0"
