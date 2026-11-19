@@ -1,5 +1,5 @@
 """
-The inputs that the 0.1.3 reference covers.
+The inputs that the reference covers.
 
 Each case makes a new input every time it is asked, so that no test can
 change the input of another.
@@ -14,7 +14,6 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 import numpy as np
-import tensorflow as tf
 
 
 SHAPE = (257, 1000)
@@ -40,6 +39,19 @@ def make_square(n: int, rate: int) -> np.ndarray:
     return 0.5 * np.sign(np.sin(2 * np.pi * 1000 * t))
 
 
+class ArrayLike:
+    """
+    An input that is not an ndarray but gives one through `__array__`,
+    as a `tf.Tensor` does.
+    """
+
+    def __init__(self, array: np.ndarray):
+        self._array = array
+
+    def __array__(self, dtype=None, copy=None):
+        return np.asarray(self._array, dtype=dtype)
+
+
 def make_case(name: str, get_input: Callable[[], object], rate: int,
               **kwargs) -> ReferenceCase:
     """A case at the default shape and `rate`, unless `kwargs` says otherwise."""
@@ -51,7 +63,7 @@ def make_case(name: str, get_input: Callable[[], object], rate: int,
 
 
 def get_reference_cases() -> list[ReferenceCase]:
-    """All 28 reference cases, in a fixed order."""
+    """All 27 reference cases, in a fixed order."""
     cases = []
 
     # Noise and a square wave, 12 s, at five input rates.
@@ -98,11 +110,8 @@ def get_reference_cases() -> list[ReferenceCase]:
     cases.append(make_case("noise-48000-int32",
                            lambda: (make_noise(576000) * 2**31).astype(np.int32),
                            48000))
-    cases.append(make_case("noise-48000-tensor-float32",
-                           lambda: tf.constant(make_noise(576000), dtype=tf.float32),
-                           48000))
-    cases.append(make_case("noise-48000-tensor-float64",
-                           lambda: tf.constant(make_noise(576000), dtype=tf.float64),
+    cases.append(make_case("noise-48000-array-like",
+                           lambda: ArrayLike(make_noise(576000).astype(np.float32)),
                            48000))
 
     # A segment of a longer input.

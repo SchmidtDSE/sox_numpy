@@ -14,16 +14,13 @@ from __future__ import annotations
 
 import functools
 import math
-import os
-import subprocess
-import tempfile
-import numpy as np
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
-import soxr
+
+import numpy as np
 import soundfile as sf
-import tensorflow as tf
+import soxr
 
 
 #
@@ -38,34 +35,32 @@ DEFAULT_DB_RANGE: int = 90
 # PUBLIC
 #
 def load_audio(
-    flac_path: str,
+    flac_path: Union[str, Path],
     start_time: Optional[float] = None,
     segment: Optional[int] = None,
     duration: Optional[float] = None,
     channel: Optional[int] = 0
-) -> Union[tf.Tensor, str]:
+) -> Tuple[np.ndarray, int]:
     """
-    utility wrapper to read flac file into tf-tensor using soundfile
+    Read a FLAC file into a NumPy array with soundfile.
 
     Args:
         flac_path: Path to FLAC file
-        start_time: Start time in seconds 
+        start_time: Start time in seconds (default: the start of the file)
         segment (int): overrides <start_time> to be the <segment>-th (0-based) <duration> clip
-        duration: Duration in seconds
-        channel: channel to extract (0 for mono)
+        duration: Duration in seconds (default: to the end of the file)
+        channel: channel to extract (0 for mono); None keeps every channel
 
     Returns (tuple):
-        tf-tensor, sample-rate
+        float64 array of samples, sample rate
     """
     if segment is not None:
+        if duration is None:
+            raise ValueError("duration is required when segment is given")
         start_time = segment * duration
-    if duration is None:
-        frames = -1
-    else:
-        info = sf.info(flac_path)
-        sample_rate = info.samplerate
-        start_sample = round(start_time * sample_rate)
-        num_samples = round(duration * sample_rate)
+    sample_rate = sf.info(flac_path).samplerate
+    start_sample = round((start_time or 0) * sample_rate)
+    num_samples = -1 if duration is None else round(duration * sample_rate)
 
     samples, sr = sf.read(
         flac_path,
@@ -78,7 +73,7 @@ def load_audio(
     if channel is not None:
         samples = samples[:, channel]
 
-    return tf.constant(samples, dtype=tf.float64), sr
+    return samples, sr
 
 
 def spectrogram_from_flac(
@@ -90,9 +85,9 @@ def spectrogram_from_flac(
     shape: Tuple[int, int] = DEFAULT_SHAPE,
     dest: Optional[Union[str, Path]] = None,
     db_range: int = DEFAULT_DB_RANGE,
-) -> Union[tf.Tensor, str]:
+) -> Union[np.ndarray, str]:
     """
-    Generate spectrogram directly from FLAC file using TensorFlow.
+    Generate a spectrogram directly from a FLAC file.
 
     Args:
         flac_path: Path to FLAC file
@@ -105,17 +100,17 @@ def spectrogram_from_flac(
         db_range: Dynamic range in dB
 
     Returns:
-        If dest is None: TensorFlow tensor (uint8)
+        If dest is None: uint8 array of palette indices, (height, width)
         If dest is provided: path to saved PNG
     """
-    audio_tensor, sample_rate = load_audio(
+    samples, sample_rate = load_audio(
         flac_path=flac_path,
         start_time=start_time,
         segment=segment,
         duration=duration,
         channel=channel)
     return spectrogram(
-        audio_array=audio_tensor,
+        audio_array=samples,
         shape=shape,
         dest=dest,
         sample_rate=sample_rate,
@@ -124,7 +119,7 @@ def spectrogram_from_flac(
 
 
 def spectrogram(
-    audio_array: Union[tf.Tensor, np.ndarray],
+    audio_array: np.ndarray,
     shape: Tuple[int, int],
     dest: Optional[Union[str, Path]] = None,
     segment: Optional[int] = None,
@@ -135,51 +130,57 @@ def spectrogram(
     create_parents: bool = True,
     overwrite: bool = True,
     db_range: int = 90,
-) -> Union[tf.Tensor, str]:
+) -> Union[np.ndarray, str]:
     """
-    Create Sox-matching spectrogram using TensorFlow.
-
-    Generates a spectrogram that matches sox output with 99.99%+ pixel accuracy.
-    Uses TensorFlow operations for GPU acceleration where available.
+    Create a spectrogram that matches the `sox` binary's.
 
     Args:
-        audio_array: Audio data as TensorFlow tensor or numpy array.
-            Expects float32/float64 in [-1, 1] or int32 (sox format).
+        audio_array: One channel of audio: a 1-D NumPy array, or anything
+            `np.asarray` takes (such as a `tf.Tensor`). Expects float32/float64
+            in [-1, 1]; int32 is cast to float without scaling.
         shape: Output shape as (height, width). Height determines frequency resolution
             (DFT size = 2 * (height - 1)), width determines time resolution.
-        dest: Optional file path to save spectrogram as PNG. If None, returns tensor.
+        dest: Optional file path to save spectrogram as PNG (needs Pillow).
+            If None, returns the array.
         segment: Segment number for extracting specific audio portion (0-indexed).
         segment_duration: Duration of each segment in seconds.
         segment_overlap: Overlap between segments in seconds (default: 0).
-        sample_rate: Sample rate of input audio in Hz. Required for tensor/array input.
+        sample_rate: Sample rate of input audio in Hz. Required.
         output_sample_rate: Sample rate for spectrogram generation (default: 8000).
         create_parents: Create parent directories if dest path doesn't exist.
         overwrite: Overwrite existing file at dest.
         db_range: Dynamic range in dB (default: 90).
 
     Returns:
-        If dest is None: TensorFlow tensor of pixel values (uint8) with shape (height, width)
+        If dest is None: uint8 array of palette indices, (height, width), C-contiguous,
+            row 0 the highest frequency
         If dest is provided: string path to saved PNG file
 
+    Raises:
+        ValueError: if the audio is not one channel, or too short for the width.
+
     Example:
-        >>> audio = tf.random.normal([96000], dtype=tf.float32)  # 12s at 8kHz
+        >>> audio = np.random.default_rng().uniform(-0.5, 0.5, 96000)  # 12s at 8kHz
         >>> pixels = spectrogram(audio, shape=(257, 1000), sample_rate=8000)
         >>> pixels.shape
-        TensorShape([257, 1000])
+        (257, 1000)
     """
+    # asarray never copies an ndarray and never writes to the caller's array
+    audio = np.asarray(audio_array)
+    if audio.ndim != 1:
+        raise ValueError(
+            f"spectrogram expects one channel, got an array of shape {audio.shape}")
+
     # Extract and validate audio samples
     samples, sr = _extract_audio_samples(
-        audio_array=audio_array,
+        audio_array=audio,
         sample_rate=sample_rate,
         segment=segment,
         segment_duration=segment_duration,
         segment_overlap=segment_overlap,
     )
 
-    # Work in NumPy float64 up to the resample (asarray copies only when the
-    # dtype differs, and never writes to the caller's array)
-    if isinstance(samples, tf.Tensor):
-        samples = samples.numpy()
+    # Work in float64 up to the resample (asarray copies only when the dtype differs)
     samples = np.asarray(samples, dtype=np.float64)
 
     # Resample if needed
@@ -205,9 +206,9 @@ def spectrogram(
     windowed = frames * setup.windows
 
     dbfs = _compute_dbfs(windowed, setup.block_norm)
-    pixels = tf.constant(_get_palette_indices(dbfs, db_range), dtype=tf.uint8)
+    pixels = np.ascontiguousarray(_get_palette_indices(dbfs, db_range))
 
-    # Return tensor or save to file
+    # Return the array or save to file
     if dest is None:
         return pixels
 
@@ -217,7 +218,7 @@ def spectrogram(
     if create_parents:
         dest_path.parent.mkdir(parents=True, exist_ok=True)
 
-    _write_png_tf(pixels, y_size, str(dest_path))
+    _write_png(pixels, str(dest_path))
     return str(dest_path)
 
 
@@ -228,15 +229,15 @@ def spectrogram(
 
 
 def _extract_audio_samples(
-    audio_array: Union[tf.Tensor, np.ndarray],
+    audio_array: np.ndarray,
     sample_rate: Optional[int],
     segment: Optional[int],
     segment_duration: Optional[float],
     segment_overlap: Optional[float],
-) -> Tuple[Union[tf.Tensor, np.ndarray], int]:
+) -> Tuple[np.ndarray, int]:
     """Extract and validate audio samples from input."""
     if sample_rate is None:
-        raise ValueError("sample_rate is required for tensor/array input")
+        raise ValueError("sample_rate is required")
     sr = sample_rate
     samples = audio_array
 
@@ -347,28 +348,24 @@ def _get_setup(y_size: int, x_size: int, length: int, sample_rate: int) -> _Setu
 
 def _compute_dbfs(windowed: np.ndarray, block_norm: float) -> np.ndarray:
     """
-    The power of each frame in dB, from the windowed frames.
+    The power of each frame in dB, from the windowed float32 frames.
 
-    These are 0.1.3's TensorFlow ops, in 0.1.3's order, and nothing else.
-    Returns float32, (width, height).
+    NumPy float32 throughout, in 0.1.3's order. NumPy 2's rfft keeps float32
+    input in complex64 (NumPy 1 upcasts to complex128). Returns float32,
+    (width, height).
     """
-    windowed_tf = tf.constant(windowed, dtype=tf.float32)
-    fft_out = tf.signal.rfft(windowed_tf)
+    fft_out = np.fft.rfft(windowed)
 
-    # Compute magnitude squared
-    magnitudes = tf.abs(fft_out) ** 2  # Shape: (x_size, rows)
+    # Magnitude squared, then the block normalization
+    magnitudes = np.abs(fft_out) ** 2  # Shape: (x_size, rows)
+    magnitudes = magnitudes * np.float32(block_norm)
 
-    # Apply block normalization
-    magnitudes = magnitudes * block_norm
-
-    # Convert to dB: 10 * log10(mag)
-    epsilon = 1e-20
-    dBfs = 10.0 * tf.math.log(magnitudes + epsilon) / tf.math.log(10.0)
+    # Convert to dB: 10 * log10(mag), written as 0.1.3 wrote it
+    epsilon = np.float32(1e-20)
+    dBfs = np.float32(10.0) * np.log(magnitudes + epsilon) / np.log(np.float32(10.0))
 
     # Clip minimum to -200 dB
-    dBfs = tf.maximum(dBfs, -200.0)
-
-    return tf.cast(dBfs, tf.float32).numpy()
+    return np.maximum(dBfs, np.float32(-200.0))
 
 
 def _get_palette_indices(dbfs: np.ndarray, db_range: int) -> np.ndarray:
@@ -487,8 +484,14 @@ def _create_windows_optimized(x_size: int, dft_size: int, step_size: int) -> np.
 # ==================================================================================================
 
 
-def _create_palette_flat(spectrum_points: int = 251) -> List[int]:
-    """Create grayscale palette matching sox as flat RGB list."""
+def get_palette(spectrum_points: int = 251) -> List[int]:
+    """
+    The palette of sox's grayscale spectrogram, as a flat RGB list.
+
+    4 fixed colours (background, text, labels, grid), then `spectrum_points`
+    grays from black to white: 765 ints by default. Index i of `spectrogram()`'s
+    array is the colour at palette[3 * i : 3 * i + 3].
+    """
     palette = []
 
     # Fixed palette entries
@@ -506,15 +509,10 @@ def _create_palette_flat(spectrum_points: int = 251) -> List[int]:
     return palette
 
 
-def _write_png_tf(pixels: tf.Tensor, y_size: int, output_path: str) -> None:
-    """Write spectrogram as indexed PNG file."""
+def _write_png(pixels: np.ndarray, output_path: str) -> None:
+    """Write the palette indices as an indexed PNG file."""
     from PIL import Image
 
-    spectrum_points = 251
-    palette = _create_palette_flat(spectrum_points)
-
-    pixels_np = pixels.numpy()
-
-    img = Image.fromarray(pixels_np, mode='P')
-    img.putpalette(palette)
+    img = Image.fromarray(pixels, mode='P')
+    img.putpalette(get_palette())
     img.save(output_path)

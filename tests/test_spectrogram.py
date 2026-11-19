@@ -1,16 +1,18 @@
-"""Tests that `spectrogram()` gives 0.1.3's pixels."""
+"""Tests of `sox_numpy`: the reference pixels, and how `spectrogram()` behaves."""
 
 import contextlib
 import importlib.metadata
 import random
+import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pytest
-import tensorflow as tf
+import soundfile as sf
 from PIL import Image
 
-from sox_numpy import processor, spectrogram
+from sox_numpy import get_palette, load_audio, processor, spectrogram
 from tests.reference_cases import (
     get_platform_key,
     get_reference_cases,
@@ -24,7 +26,7 @@ CASES = get_reference_cases()
 
 @pytest.fixture(scope="session")
 def reference():
-    """The 0.1.3 pixels for this platform, by case name."""
+    """The reference pixels for this platform, by case name."""
     path = get_reference_path()
     if not path.exists():
         message = f"no reference for this platform: {path}"
@@ -36,10 +38,11 @@ def reference():
 
 
 @pytest.mark.parametrize("case", CASES, ids=[case.name for case in CASES])
-def test_spectrogram_matches_the_0_1_3_reference(case, reference):
+def test_spectrogram_matches_the_reference(case, reference):
     pixels = spectrogram(case.get_input(), **case.kwargs)
-    assert pixels.dtype == tf.uint8
-    np.testing.assert_array_equal(pixels.numpy(), reference[case.name])
+    assert isinstance(pixels, np.ndarray)
+    assert pixels.dtype == np.uint8
+    np.testing.assert_array_equal(pixels, reference[case.name])
 
 
 CASES_BY_NAME = {case.name: case for case in CASES}
@@ -48,7 +51,7 @@ CASES_BY_NAME = {case.name: case for case in CASES}
 def get_pixels(name):
     """The pixels of one reference case, as a NumPy array."""
     case = CASES_BY_NAME[name]
-    return spectrogram(case.get_input(), **case.kwargs).numpy()
+    return spectrogram(case.get_input(), **case.kwargs)
 
 
 def test_a_call_after_a_call_with_another_key_matches_a_fresh_call(reference):
@@ -82,8 +85,8 @@ def test_concurrent_calls_match_serial_calls(reference):
 
 def test_the_setup_cache_holds_at_most_16_setups():
     # 4 of these 40 lengths (such as 81600) put the last frame past the padded
-    # audio; 0.1.3 raises IndexError on them, 0.1.4 ValueError, and a call that
-    # raises is not cached.
+    # audio; 0.1.3 raised IndexError on them, sox_numpy raises ValueError, and a
+    # call that raises is not cached.
     processor._get_setup.cache_clear()
     made = 0
     for length in range(80000, 111200 + 1, 800):
@@ -117,9 +120,71 @@ def test_dest_writes_a_png_of_the_returned_pixels(tmp_path):
     path = tmp_path / "a.png"
     result = spectrogram(case.get_input(), dest=path, **case.kwargs)
     assert result == str(path)
-    pixels = spectrogram(case.get_input(), **case.kwargs).numpy()
+    pixels = spectrogram(case.get_input(), **case.kwargs)
     np.testing.assert_array_equal(np.asarray(Image.open(path)), pixels)
 
 
 def test_the_package_is_sox_numpy_0_1_0():
     assert importlib.metadata.version("sox_numpy") == "0.1.0"
+
+
+NO_TENSORFLOW_SCRIPT = """
+import sys
+import numpy as np
+from sox_numpy import spectrogram
+audio = np.random.default_rng(7).uniform(-0.5, 0.5, 12 * 48000)
+spectrogram(audio, shape=(257, 1000), sample_rate=48000)
+assert "tensorflow" not in sys.modules, "sox_numpy loaded tensorflow"
+"""
+
+
+def test_sox_numpy_does_not_import_tensorflow():
+    subprocess.run([sys.executable, "-c", NO_TENSORFLOW_SCRIPT], check=True)
+
+
+def test_the_rfft_stays_float32():
+    windowed = np.random.default_rng(7).uniform(-1, 1, (1000, 512)).astype(np.float32)
+    dbfs = processor._compute_dbfs(windowed, 1.0 / 96)
+    assert dbfs.dtype == np.float32
+    assert dbfs.shape == (1000, 257)
+    assert np.fft.rfft(np.zeros(512, np.float32)).dtype == np.complex64
+
+
+def test_get_palette_has_4_fixed_colours_then_251_grays():
+    palette = get_palette()
+    assert len(palette) == 765
+    assert palette[:12] == [0, 0, 0, 255, 255, 255, 191, 191, 191, 127, 127, 127]
+    assert palette[-3:] == [255, 255, 255]
+
+
+@pytest.fixture
+def flac_2s_48k(tmp_path):
+    """A 2 s mono FLAC at 48 kHz, and the samples written to it."""
+    path = tmp_path / "a.flac"
+    audio = np.random.default_rng(7).uniform(-0.5, 0.5, 96000)
+    sf.write(path, audio, 48000, subtype="PCM_24")
+    return path, sf.read(path, dtype="float64")[0]
+
+
+def test_load_audio_returns_a_numpy_array(flac_2s_48k):
+    path, written = flac_2s_48k
+    samples, rate = load_audio(path, start_time=0, duration=1)
+    assert isinstance(samples, np.ndarray)
+    assert samples.dtype == np.float64
+    assert rate == 48000
+    np.testing.assert_array_equal(samples, written[:48000])
+
+
+def test_load_audio_without_duration_reads_the_whole_file(flac_2s_48k):
+    path, written = flac_2s_48k
+    samples, rate = load_audio(path)
+    assert isinstance(samples, np.ndarray)
+    assert samples.dtype == np.float64
+    assert samples.shape == (96000,)
+    assert rate == 48000
+    np.testing.assert_array_equal(samples, written)
+
+
+def test_a_2d_array_raises_value_error():
+    with pytest.raises(ValueError, match="one channel"):
+        spectrogram(np.zeros((96000, 2)), shape=(257, 1000), sample_rate=8000)

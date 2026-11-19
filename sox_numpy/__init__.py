@@ -1,1 +1,1 @@
-from sox_numpy.processor import spectrogram, spectrogram_from_flac, load_audio
+from sox_numpy.processor import get_palette, load_audio, spectrogram, spectrogram_from_flac

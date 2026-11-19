@@ -21,17 +21,16 @@ classifiers = [
 ]
 requires-python = ">=3.11"
 dependencies = [
-	"numpy >=1.26.0,<3",
+	"numpy >=2,<3",
 	"soundfile >=0.13.1,<0.14",
 	"soxr >=0.3.0",
 ]
 
 [project.optional-dependencies]
-# TensorFlow — install the variant for your platform (required to use the package)
-tf-linux = ["tensorflow>=2.16.0"]
-# tensorflow-metal 1.2.0 fails to load on TF >=2.20
-tf-mac   = ["tensorflow>=2.18.0,<2.20.0", "tensorflow-metal>=1.2.0,<2"]
-# Comparison and analysis tools
+# Writing PNGs with `dest`
+png = ["pillow>=10"]
+# Comparison and analysis tools (the PNW-Cnet model also needs TensorFlow:
+# see the pixi `compare` environment)
 comparison = [
 	"click>=8",
 	"pillow>=10",
@@ -56,31 +55,12 @@ packages = [
 
 [tool.pixi.workspace]
 channels = ["conda-forge"]
-platforms = ["osx-arm64", "linux-64", "osx-64", "linux-aarch64"]
+platforms = ["osx-arm64", "linux-64", "linux-aarch64"]
 # canister-worm-protection
 exclude-newer = "2026-03-12"
 
 [tool.pixi.pypi-dependencies]
 sox_numpy = { path = ".", editable = true }
-
-# TensorFlow — platform-specific
-[tool.pixi.target.linux-64.pypi-dependencies]
-tensorflow = ">=2.18.0"
-tf_keras = "*"
-
-[tool.pixi.target.osx-64.pypi-dependencies]
-tensorflow = ">=2.16.0,<2.17.0"
-tf_keras = ">=2.16.0,<3"
-
-[tool.pixi.target.linux-aarch64.pypi-dependencies]
-tensorflow = ">=2.18.0"
-tf_keras = "*"
-
-[tool.pixi.target.osx-arm64.pypi-dependencies]
-# tensorflow-metal 1.2.0 fails to load on TF >=2.20
-tensorflow = ">=2.18.0,<2.20.0"
-tensorflow-metal = ">=1.2.0,<2"
-tf_keras = ">=2.18.0,<2.20.0"
 
 [tool.pixi.dependencies]
 python = ">=3.11,<3.12"
@@ -89,6 +69,8 @@ python = ">=3.11,<3.12"
 default = { features = [] }
 dev     = { features = ["dev"] }
 test    = { features = ["test"] }
+# The comparison harness: TensorFlow for the PNW-Cnet model, and the sox binary
+compare = { features = ["compare"] }
 
 [tool.pixi.feature.dev.dependencies]
 twine = "*"
@@ -104,7 +86,32 @@ pytest = ">=8,<9"
 test = "pytest"
 
 [tool.pixi.feature.test.pypi-dependencies]
-sox_numpy = { path = ".", extras = ["comparison"], editable = true }
+sox_numpy = { path = ".", extras = ["png"], editable = true }
+
+# conda-forge has no sox for linux-aarch64; there, put sox on PATH yourself
+[tool.pixi.feature.compare.target.linux-64.dependencies]
+sox = "*"
+
+[tool.pixi.feature.compare.target.osx-arm64.dependencies]
+sox = "*"
+
+[tool.pixi.feature.compare.pypi-dependencies]
+sox_numpy = { path = ".", extras = ["png", "comparison"], editable = true }
+
+# TensorFlow — platform-specific, only for the comparison harness
+[tool.pixi.feature.compare.target.linux-64.pypi-dependencies]
+tensorflow = ">=2.18.0"
+tf_keras = "*"
+
+[tool.pixi.feature.compare.target.linux-aarch64.pypi-dependencies]
+tensorflow = ">=2.18.0"
+tf_keras = "*"
+
+[tool.pixi.feature.compare.target.osx-arm64.pypi-dependencies]
+# tensorflow-metal 1.2.0 fails to load on TF >=2.20
+tensorflow = ">=2.18.0,<2.20.0"
+tensorflow-metal = ">=1.2.0,<2"
+tf_keras = ">=2.18.0,<2.20.0"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

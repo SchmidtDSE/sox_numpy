@@ -1,19 +1,20 @@
 """
 Make the reference pixels for this platform.
 
-Run it only on the code of tag 0.1.3, once for each platform:
+Run it on the commit that switched `sox_numpy` to NumPy's rfft, and after that
+only when a change is meant to change pixels, once for each platform:
 
     pixi run -e test python tests/make_reference.py
 
 It writes tests/fixtures/reference-<platform>.npz, one array for each case in
-`get_reference_cases()`, and `_versions` with the NumPy and TensorFlow versions.
+`get_reference_cases()`, and `_versions` with the NumPy and soxr versions.
 """
 
 import sys
 from pathlib import Path
 
 import numpy as np
-import tensorflow as tf
+import soxr
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -25,13 +26,13 @@ def make_reference() -> Path:
     """Compute every case and write the reference file."""
     arrays = {}
     for case in get_reference_cases():
-        arrays[case.name] = spectrogram(case.get_input(), **case.kwargs).numpy()
+        arrays[case.name] = spectrogram(case.get_input(), **case.kwargs)
         print(f"{case.name}: {arrays[case.name].shape} {arrays[case.name].dtype}")
 
     # The reference must reach the dBfs >= 0 branch.
     assert (arrays["saturated-48000"] == 254).any()
 
-    arrays["_versions"] = np.array(f"numpy {np.__version__}, tensorflow {tf.__version__}")
+    arrays["_versions"] = np.array(f"numpy {np.__version__}, soxr {soxr.__version__}")
     path = get_reference_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(path, **arrays)
