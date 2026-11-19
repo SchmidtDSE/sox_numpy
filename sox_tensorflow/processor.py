@@ -18,10 +18,13 @@ Example usage:
 
 from __future__ import annotations
 
+import functools
+import math
 import os
 import subprocess
 import tempfile
 import numpy as np
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
 import soxr
@@ -179,25 +182,36 @@ def spectrogram(
         segment_overlap=segment_overlap,
     )
 
-    # Convert to TensorFlow tensor if needed
-    if not isinstance(samples, tf.Tensor):
-        samples = tf.constant(samples, dtype=tf.float64)
-    elif samples.dtype != tf.float64:
-        samples = tf.cast(samples, tf.float64)
+    # Work in NumPy float64 up to the resample (asarray copies only when the
+    # dtype differs, and never writes to the caller's array)
+    if isinstance(samples, tf.Tensor):
+        samples = samples.numpy()
+    samples = np.asarray(samples, dtype=np.float64)
 
     # Resample if needed
     if sr != output_sample_rate:
         samples = _resample(samples, in_rate=sr, out_rate=output_sample_rate)
+    samples = samples.astype(np.float32)
 
-    # Generate spectrogram using TensorFlow
+    # The step size, padding and windows depend only on the shape, the length
+    # and the rate, so they are made once and shared between calls
     y_size, x_size = shape
-    pixels = _generate_spectrogram_tf(
-        samples=samples,
-        sample_rate=output_sample_rate,
-        x_size=x_size,
-        y_size=y_size,
-        db_range=db_range,
-    )
+    dft_size = 2 * (y_size - 1)  # 512 for y_size=257
+    setup = _get_setup(y_size, x_size, len(samples), output_sample_rate)
+
+    # Pad with zeros, take every frame as a view of the padded audio, and
+    # apply the per-frame windows (the product is the only copy of the frames)
+    padded = np.concatenate([
+        np.zeros(setup.pad_left, dtype=np.float32),
+        samples,
+        np.zeros(setup.pad_right, dtype=np.float32),
+    ])
+    frames = np.lib.stride_tricks.sliding_window_view(padded, dft_size)
+    frames = frames[::setup.step_size][:x_size]
+    windowed = frames * setup.windows
+
+    dbfs = _compute_dbfs(windowed, setup.block_norm)
+    pixels = tf.constant(_get_palette_indices(dbfs, db_range), dtype=tf.uint8)
 
     # Return tensor or save to file
     if dest is None:
@@ -245,10 +259,10 @@ def _extract_audio_samples(
 
 
 def _resample(
-    samples: tf.Tensor,
+    samples: np.ndarray,
     in_rate: int,
     out_rate: int,
-) -> tf.Tensor:
+) -> np.ndarray:
     """
     Resample audio using soxr library (SoX Resampler).
 
@@ -257,97 +271,130 @@ def _resample(
     spectrogram pixel match with sox binary.
 
     Args:
-        samples: Audio samples as TensorFlow tensor (float64)
+        samples: Audio samples as a NumPy array (float64)
         in_rate: Input sample rate in Hz
         out_rate: Output sample rate in Hz
 
     Returns:
-        Resampled audio as TensorFlow tensor (float64)
+        Resampled audio as a NumPy array (float64)
     """
-    # Convert to numpy for soxr processing
-    samples_np = samples.numpy()
-
     # Resample using soxr HQ quality (matches sox -h)
-    resampled = soxr.resample(samples_np, in_rate, out_rate, quality='HQ')
+    resampled = soxr.resample(samples, in_rate, out_rate, quality='HQ')
 
     # Clip to [-1, 1] range to match sox behavior (soxr can overshoot on transients)
-    resampled = np.clip(resampled, -1.0, 1.0)
-
-    return tf.constant(resampled, dtype=tf.float64)
+    return np.clip(resampled, -1.0, 1.0)
 
 
 # ==================================================================================================
-# INTERNAL: TensorFlow Spectrogram Generation
+# INTERNAL: Spectrogram Generation
 # ==================================================================================================
 
 
-def _generate_spectrogram_tf(
-    samples: tf.Tensor,
-    sample_rate: int,
-    x_size: int,
-    y_size: int,
-    db_range: int,
-) -> tf.Tensor:
+@dataclass(frozen=True)
+class _Setup:
     """
-    Generate spectrogram using TensorFlow operations.
+    What a spectrogram needs that depends only on the shape, the length and the rate.
 
-    Replicates sox's spectrogram algorithm using TensorFlow for potential GPU acceleration.
+    Shared between calls and threads, so it must never change: `windows` is read-only.
     """
-    # Calculate parameters (matching sox)
-    dft_size = 2 * (y_size - 1)  # 512 for y_size=257
-    rows = dft_size // 2 + 1     # 257
+    step_size: int
+    block_norm: float
+    pad_left: int
+    pad_right: int
+    windows: np.ndarray  # float32, (width, dft_size)
 
-    duration = tf.cast(tf.shape(samples)[0], tf.float64) / tf.cast(sample_rate, tf.float64)
-    pixels_per_sec = tf.cast(x_size, tf.float64) / duration
 
-    # Create Hann window with sox normalization
-    window = _make_hann_window_tf(dft_size)
+@functools.lru_cache(maxsize=16)
+def _get_setup(y_size: int, x_size: int, length: int, sample_rate: int) -> _Setup:
+    """
+    Make the step size, padding and per-frame windows for one shape, length and rate.
 
-    # Calculate step_size and block_steps (sox algorithm)
-    # IMPORTANT: Use the UNNORMALIZED Hann window sum for step_size calculation
-    # The unnormalized Hann window sum is dft_size/2
-    window_sum_unnormalized = tf.cast(dft_size, tf.float64) / 2.0
-    step_size = tf.cast(tf.round(window_sum_unnormalized), tf.int32)
-    block_steps_float = tf.cast(sample_rate, tf.float64) / pixels_per_sec
-    step_size = tf.cast(
-        tf.round(block_steps_float / tf.math.ceil(block_steps_float / tf.cast(step_size, tf.float64))),
-        tf.int32
-    )
-    block_steps = tf.cast(tf.round(block_steps_float / tf.cast(step_size, tf.float64)), tf.int32)
-    block_norm = 1.0 / tf.cast(block_steps, tf.float64)
+    The step sizes follow sox's algorithm, with Python float64 ops in the same order
+    as 0.1.3's TensorFlow float64 ops (both round half to even), so they are equal
+    bit for bit. Raises ValueError when the audio is too short for the width.
+    """
+    too_short = (f"audio of {length} samples at {sample_rate} Hz is too short "
+                 f"for width {x_size}")
+    if length == 0:
+        raise ValueError(too_short)
+    dft_size = 2 * (y_size - 1)
+    duration = length / sample_rate
+    pixels_per_sec = x_size / duration
+    block_steps_float = sample_rate / pixels_per_sec
 
-    # Process audio through FFT loop
-    all_dBfs = _fft_loop_tf(
-        samples=samples,
-        window=window,
-        dft_size=dft_size,
+    # IMPORTANT: the first step comes from the UNNORMALIZED Hann window sum,
+    # which is dft_size / 2
+    step = round(dft_size / 2.0)
+    step_size = round(block_steps_float / math.ceil(block_steps_float / step))
+    if step_size == 0:
+        raise ValueError(too_short)
+    block_steps = round(block_steps_float / step_size)
+    block_norm = 1.0 / block_steps
+
+    # Zero padding: on the left for the start edge, on the right for the drain phase
+    initial_read = (step_size - dft_size) // 2
+    pad_left = -initial_read  # 208
+    pad_right = dft_size + step_size
+
+    # Every frame must fit in the padded audio
+    if (x_size - 1) * step_size + dft_size > pad_left + length + pad_right:
+        raise ValueError(too_short)
+
+    windows = _create_windows_optimized(x_size, dft_size, step_size)
+    windows.flags.writeable = False
+    return _Setup(
         step_size=step_size,
-        block_steps=block_steps,
         block_norm=block_norm,
-        rows=rows,
-        x_size=x_size,
+        pad_left=pad_left,
+        pad_right=pad_right,
+        windows=windows,
     )
 
-    # Convert dBfs to pixel values
-    pixels = _render_pixels_tf(all_dBfs, db_range, rows)
 
-    return pixels
+def _compute_dbfs(windowed: np.ndarray, block_norm: float) -> np.ndarray:
+    """
+    The power of each frame in dB, from the windowed frames.
+
+    These are 0.1.3's TensorFlow ops, in 0.1.3's order, and nothing else.
+    Returns float32, (width, height).
+    """
+    windowed_tf = tf.constant(windowed, dtype=tf.float32)
+    fft_out = tf.signal.rfft(windowed_tf)
+
+    # Compute magnitude squared
+    magnitudes = tf.abs(fft_out) ** 2  # Shape: (x_size, rows)
+
+    # Apply block normalization
+    magnitudes = magnitudes * block_norm
+
+    # Convert to dB: 10 * log10(mag)
+    epsilon = 1e-20
+    dBfs = 10.0 * tf.math.log(magnitudes + epsilon) / tf.math.log(10.0)
+
+    # Clip minimum to -200 dB
+    dBfs = tf.maximum(dBfs, -200.0)
+
+    return tf.cast(dBfs, tf.float32).numpy()
 
 
-def _make_hann_window_tf(dft_size: int) -> tf.Tensor:
-    """Create Hann window with sox-specific normalization."""
-    n = dft_size
-    # Hann window: 0.5 - 0.5 * cos(2*pi*i/(n-1))
-    i = tf.range(n, dtype=tf.float64)
-    m = tf.cast(n - 1, tf.float64)
-    window = 0.5 - 0.5 * tf.cos(2.0 * np.pi * i / m)
+def _get_palette_indices(dbfs: np.ndarray, db_range: int) -> np.ndarray:
+    """
+    Map dB to palette indices, uint8, (height, width), highest frequency first.
 
-    # Sox normalization: window *= 2/sum * ((n-1)/dft_size)^2
-    window_sum = tf.reduce_sum(window)
-    norm_factor = 2.0 / window_sum * tf.square((m) / tf.cast(dft_size, tf.float64))
-    window = window * norm_factor
+    NumPy float32 throughout, in 0.1.3's order:
+        c = 0 if dB < -db_range
+        c = spectrum_points - 1 if dB >= 0
+        c = 1 + (1 + dB/db_range) * (spectrum_points - 2) otherwise
+    then the fixed palette offset of 4. spectrum_points is 251.
+    """
+    db_range32 = np.float32(db_range)
+    c = np.float32(1.0) + (np.float32(1.0) + dbfs / db_range32) * np.float32(249)
+    c = np.clip(c, np.float32(0), np.float32(250))
+    c = np.where(dbfs < -db_range32, np.float32(0), c)
+    c = np.where(dbfs >= np.float32(0), np.float32(250), c)
 
-    return window
+    # Sox: row 0 = highest frequency, we have row 0 = DC
+    return (c.astype(np.int32) + 4).astype(np.uint8).T[::-1]
 
 
 def _make_window_vectorized(dft_size: int, end_val: int) -> np.ndarray:
@@ -397,46 +444,6 @@ def _make_window_vectorized(dft_size: int, end_val: int) -> np.ndarray:
     return w[:dft_size]
 
 
-def _compute_end_values(x_size: int, dft_size: int, step_size: int) -> np.ndarray:
-    """
-    Compute edge parameter (end value) for each frame.
-
-    Sox uses partial Hann windows at the start and end of the signal.
-    This function computes the end values for all frames, including
-    the main phase and drain phase.
-
-    Args:
-        x_size: Number of output columns (frames)
-        dft_size: FFT size
-        step_size: Step size between frames
-
-    Returns:
-        Array of end values for each frame
-    """
-    # initial_read starts negative: (step_size - dft_size) // 2 = -208
-    # Before first FFT, we consume: step_size - initial_read = 96 - (-208) = 304 samples
-    initial_read = (step_size - dft_size) // 2
-    initial_samples = step_size - initial_read  # 304 samples before first FFT
-
-    end_values = []
-
-    # Main phase: frames consuming actual samples
-    main_frames = x_size - 3  # Reserve 3 for drain phase
-
-    for i in range(main_frames):
-        # After frame i, total samples consumed = initial_samples + i * step_size
-        samples_consumed = initial_samples + i * step_size
-        end = max(dft_size - samples_consumed, 0)
-        end_values.append(end)
-
-    # Drain phase: 3 frames with decreasing window coverage
-    # These frames process zero-padded tail of the signal
-    # end values: -16, -112, -208
-    end_values.extend([-16, -112, -208])
-
-    return np.array(end_values, dtype=np.int32)
-
-
 def _create_windows_optimized(x_size: int, dft_size: int, step_size: int) -> np.ndarray:
     """
     Create optimized per-frame windows.
@@ -479,111 +486,6 @@ def _create_windows_optimized(x_size: int, dft_size: int, step_size: int) -> np.
     windows[-1] = _make_window_vectorized(dft_size, -208)
 
     return windows
-
-
-def _fft_loop_tf(
-    samples: tf.Tensor,
-    window: tf.Tensor,
-    dft_size: int,
-    step_size: tf.Tensor,
-    block_steps: tf.Tensor,
-    block_norm: tf.Tensor,
-    rows: int,
-    x_size: int,
-) -> tf.Tensor:
-    """
-    Vectorized FFT processing for GPU acceleration.
-
-    This implementation extracts all frames at once, applies per-frame windows,
-    and computes FFT in batch for efficient GPU execution.
-
-    The edge handling matches sox's spectrogram algorithm exactly:
-    - First ~3 frames: partial windows (start edge)
-    - Middle frames: full Hann window
-    - Last 3 frames: partial windows (drain phase)
-    """
-    step_size_val = int(step_size.numpy())
-    block_steps_val = int(block_steps.numpy())
-    block_norm_val = float(block_norm.numpy())
-
-    # Convert to numpy for frame extraction
-    samples_np = samples.numpy().astype(np.float32)
-
-    # Create optimized windows (only creates partial windows for edge frames)
-    windows = _create_windows_optimized(x_size, dft_size, step_size_val)
-
-    # Calculate padding for frame extraction
-    initial_read = (step_size_val - dft_size) // 2
-    pad_left = -initial_read  # 208
-
-    # Pad right for drain phase
-    pad_right = dft_size + step_size_val
-
-    # Pad audio
-    audio_padded = np.concatenate([
-        np.zeros(pad_left, dtype=np.float32),
-        samples_np,
-        np.zeros(pad_right, dtype=np.float32)
-    ])
-
-    # Extract all frames at once using advanced indexing
-    frame_starts = np.arange(x_size) * step_size_val
-    indices = frame_starts[:, np.newaxis] + np.arange(dft_size)
-    frames = audio_padded[indices]  # Shape: (x_size, dft_size)
-
-    # Apply per-frame windows
-    windowed = frames * windows
-
-    # Convert to TensorFlow and compute FFT
-    windowed_tf = tf.constant(windowed, dtype=tf.float32)
-    fft_out = tf.signal.rfft(windowed_tf)
-
-    # Compute magnitude squared
-    magnitudes = tf.abs(fft_out) ** 2  # Shape: (x_size, rows)
-
-    # Apply block normalization
-    magnitudes = magnitudes * block_norm_val
-
-    # Convert to dB: 10 * log10(mag)
-    epsilon = 1e-20
-    dBfs = 10.0 * tf.math.log(magnitudes + epsilon) / tf.math.log(10.0)
-
-    # Clip minimum to -200 dB
-    dBfs = tf.maximum(dBfs, -200.0)
-
-    return tf.cast(dBfs, tf.float32)
-
-
-def _render_pixels_tf(all_dBfs: tf.Tensor, db_range: int, rows: int) -> tf.Tensor:
-    """Convert dBfs values to pixel values using TensorFlow."""
-    spectrum_points = 251
-    fixed_palette = 4
-
-    # Map dB to palette index
-    # c = 0 if dB < -db_range
-    # c = spectrum_points - 1 if dB >= 0
-    # c = 1 + (1 + dB/db_range) * (spectrum_points - 2) otherwise
-
-    dB_normalized = all_dBfs / float(db_range)  # -1 to 0 range for valid values
-
-    # Calculate color index
-    c = 1.0 + (1.0 + dB_normalized) * (spectrum_points - 2)
-    c = tf.clip_by_value(c, 0, spectrum_points - 1)
-
-    # Apply boundary conditions
-    c = tf.where(all_dBfs < -db_range, tf.zeros_like(c), c)
-    c = tf.where(all_dBfs >= 0, tf.fill(tf.shape(c), float(spectrum_points - 1)), c)
-
-    # Add fixed palette offset and convert to uint8
-    pixel_values = tf.cast(c, tf.int32) + fixed_palette
-    pixel_values = tf.cast(pixel_values, tf.uint8)
-
-    # Transpose and flip for correct orientation
-    # Sox: row 0 = highest frequency, we have row 0 = DC
-    pixels = tf.transpose(pixel_values)  # [rows, cols]
-    pixels = tf.reverse(pixels, axis=[0])  # Flip vertically
-
-    return pixels
 
 
 # ==================================================================================================
