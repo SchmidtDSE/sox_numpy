@@ -59,11 +59,14 @@ from the standard AWS credential chain (`~/.aws/credentials`, env vars, IAM role
 
 ### 2. Run
 
-**With pixi (recommended):**
+**With pixi (recommended):** the `compare` environment has what the harness needs
+beyond `sox_numpy` itself: TensorFlow and tf_keras for the PNW-Cnet model, and the
+conda-forge `sox` binary (on osx-arm64 and linux-64; on linux-aarch64, put `sox` on
+your PATH). The package's own `test` environment has no TensorFlow.
 
 ```bash
-pixi run --environment test compare-spectrograms
-pixi run --environment test compare-model
+pixi run --environment compare compare-spectrograms
+pixi run --environment compare compare-model
 ```
 
 **Or directly:**
@@ -95,7 +98,7 @@ The notebook reads paths from `config.yaml` automatically — just set
 | `config.yaml` | Default configuration for both scripts |
 | `compare_spectrograms.py` | Generates spectrogram pairs (sox + sox_numpy) and compares pixel-by-pixel |
 | `compare_model.py` | Runs a model on existing spectrogram pairs and compares predictions |
-| `parity_check.sh` | Runs both scripts in the pixi env of a base git ref (default `main`) and of the current tree, then plots them side by side — e.g. to show a dependency bump doesn't change output. `comparison/parity_check.sh -h` for options |
+| `parity_check.sh` | Runs both scripts in the pixi env (`compare`, or `test` for sox_tensorflow 0.1.3) of a base git ref (default `main`) and of the current tree, then plots them side by side — e.g. to show a dependency bump doesn't change output. `comparison/parity_check.sh -h` for options |
 | `plot_parity.py` | Plots the before/after figure from two `parity_check.sh` runs |
 | `analysis.pnw-owl.ipynb` | Reference analysis notebook for the PNW-OWL model |
 | `models/README.md` | PNW-Cnet v4 citation and class list |
@@ -106,7 +109,7 @@ The notebook reads paths from `config.yaml` automatically — just set
 
 ```bash
 # via pixi
-pixi run --environment test compare-spectrograms [audio...] [options]
+pixi run --environment compare compare-spectrograms [audio...] [options]
 
 # directly
 python compare_spectrograms.py [audio...] [options]
@@ -138,7 +141,7 @@ Supported formats: FLAC, WAV, MP3, OGG.
 
 ```bash
 # via pixi
-pixi run --environment test compare-model [options]
+pixi run --environment compare compare-model [options]
 
 # directly
 python compare_model.py [options]
@@ -207,10 +210,10 @@ For public bucket listing (`s3://bucket/prefix/`) the bucket policy must allow
 vim config.yaml
 
 # Generate spectrogram pairs
-pixi run --environment test compare-spectrograms
+pixi run --environment compare compare-spectrograms
 
 # Compare model predictions
-pixi run --environment test compare-model
+pixi run --environment compare compare-model
 
 # Open a copy of the notebook for this run
 cp analysis.pnw-owl.ipynb analysis.my-run.ipynb
