@@ -97,5 +97,14 @@ twine = "*"
 build = "*"
 h5py = ">=3.15.1,<4"
 
+[tool.pixi.feature.test.dependencies]
+pytest = ">=8,<9"
+
+[tool.pixi.feature.test.tasks]
+test = "pytest"
+
 [tool.pixi.feature.test.pypi-dependencies]
 sox_tensorflow = { path = ".", extras = ["comparison"], editable = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
